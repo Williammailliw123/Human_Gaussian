@@ -8,7 +8,7 @@ from diffusers.utils.import_utils import is_xformers_available
 from tqdm import tqdm
 
 try:
-    from models.pipeline_rgbdepth import StableDiffusionPipeline
+    from threestudio.models.guidance.models.pipeline_rgbdepth import StableDiffusionPipeline
 except:
     from .models.pipeline_rgbdepth import StableDiffusionPipeline
 
@@ -91,7 +91,7 @@ class StableDiffusionGuidance(BaseObject):
         )
 
         try:
-            from models.unet_rgbdepth import UNet2DConditionModel
+            from threestudio.models.guidance.models.unet_rgbdepth import UNet2DConditionModel
         except:
             from .models.unet_rgbdepth import UNet2DConditionModel
         unet = UNet2DConditionModel.from_pretrained(self.cfg.model_key, subfolder="unet_ema").to(self.weights_dtype)
@@ -234,14 +234,24 @@ class StableDiffusionGuidance(BaseObject):
         #     mid_block_additional_residual=mid_sample,
         # ).sample.to(input_dtype)
 
+
     @torch.cuda.amp.autocast(enabled=False)
     def encode_images(
         self, imgs: Float[Tensor, "B 3 512 512"]
     ) -> Float[Tensor, "B 4 64 64"]:
         input_dtype = imgs.dtype
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 确保将输入图像移动到 GPU，并转换为 float16
+        imgs = imgs.to(device).to(torch.float16)
+        
         imgs = imgs * 2.0 - 1.0
-        posterior = self.vae.encode(imgs.to(self.weights_dtype)).latent_dist
+
+        # 确保模型也在 GPU 上
+        self.vae.to(device).to(torch.float16)
+
+        posterior = self.vae.encode(imgs).latent_dist
         latents = posterior.sample() * self.vae.config.scaling_factor
+        
         return latents.to(input_dtype)
 
     @torch.cuda.amp.autocast(enabled=False)

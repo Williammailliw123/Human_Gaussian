@@ -35,7 +35,7 @@ from diffusers.models.embeddings import (
     Timesteps,
 )
 from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unet_2d_blocks import (
+from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
     CrossAttnUpBlock2D,
     DownBlock2D,
@@ -855,13 +855,15 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timesteps = timesteps.expand(sample.shape[0])
 
-        t_emb = self.time_proj(timesteps)
+        t_emb = self.time_proj(timesteps).to(device=sample.device)
 
         # `Timesteps` does not contain any weights and will always return f32 tensors
         # but time_embedding might actually be running in fp16. so we need to cast here.
         # there might be better ways to encapsulate this.
         t_emb = t_emb.to(dtype=sample.dtype)
-        emb = self.time_embedding(t_emb, timestep_cond)
+        t_emb = t_emb.to(device=sample.device)
+        self.time_embedding = self.time_embedding.to("cuda")
+        emb = self.time_embedding(t_emb)
             
         aug_emb = None
 
@@ -921,6 +923,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
 
             add_embeds = time_embeds
             add_embeds = add_embeds.to(emb.dtype)
+            self.add_embedding.to("cuda")
             aug_emb = self.add_embedding(add_embeds)
         elif self.config.addition_embed_type == "image":
             # Kandinsky 2.2 - style
@@ -967,10 +970,12 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             encoder_hidden_states = self.encoder_hid_proj(image_embeds)         
             
         # 2. pre-process
+        self.conv_in=self.conv_in.to("cuda")
         sample = self.conv_in(sample)
         
         sample_in_list = []
         for i in range(self.branch_num):
+            self.conv_in_branch=self.conv_in_branch.to("cuda")
             sample_in_list.append(self.conv_in_branch[i](sample_noisy_list[i]))
 
         # 3. down
@@ -985,7 +990,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 additional_residuals = {}
                 if is_adapter and len(down_block_additional_residuals) > 0:
                     additional_residuals["additional_residuals"] = down_block_additional_residuals.pop(0)
-
+                downsample_block=downsample_block.to("cuda")
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -996,6 +1001,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     **additional_residuals,
                 )
             else:
+                downsample_block=downsample_block.to("cuda")
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
 
                 if is_adapter and len(down_block_additional_residuals) > 0:
@@ -1014,7 +1020,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     additional_residuals = {}
                     if is_adapter and len(down_block_additional_residuals) > 0:
                         additional_residuals["additional_residuals"] = down_block_additional_residuals.pop(0)
-
+                    downsample_block=downsample_block.to("cuda")
                     sample_in_list[j], res_samples = downsample_block(
                         hidden_states=sample_in_list[j],
                         temb=emb,
@@ -1053,7 +1059,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 additional_residuals = {}
                 if is_adapter and len(down_block_additional_residuals) > 0:
                     additional_residuals["additional_residuals"] = down_block_additional_residuals.pop(0)
-
+                downsample_block=downsample_block.to("cuda")
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -1064,6 +1070,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     **additional_residuals,
                 )
             else:
+                downsample_block=downsample_block.to("cuda")
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
 
                 if is_adapter and len(down_block_additional_residuals) > 0:
@@ -1085,6 +1092,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             down_block_res_samples = new_down_block_res_samples
 
         # 4. mid
+        self.mid_block=self.mid_block.to("cuda")
         if self.mid_block is not None:
             sample = self.mid_block(
                 sample,
@@ -1113,6 +1121,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
+                upsample_block=upsample_block.to("cuda")
                 sample = upsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -1124,6 +1133,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_attention_mask=encoder_attention_mask,
                 )
             else:
+                upsample_block=upsample_block.to("cuda")
                 sample = upsample_block(
                     hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
                 )
@@ -1143,6 +1153,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     upsample_size = down_block_res_samples_list[j][-1].shape[2:]
 
                 if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
+                    upsample_block=upsample_block.to("cuda")
                     sample_copy = upsample_block(
                         hidden_states=sample_copy,
                         temb=emb,
@@ -1154,6 +1165,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                         encoder_attention_mask=encoder_attention_mask,
                     )
                 else:
+                    upsample_block=upsample_block.to("cuda")
                     sample_copy = upsample_block(
                         hidden_states=sample_copy, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
                     )
@@ -1171,6 +1183,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
+                upsample_block=upsample_block.to("cuda")
                 sample = upsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -1182,21 +1195,28 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_attention_mask=encoder_attention_mask,
                 )
             else:
+                upsample_block=upsample_block.to("cuda")
                 sample = upsample_block(
                     hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
                 )
                 
         if self.conv_norm_out:
+            self.conv_norm_out=self.conv_norm_out.to("cuda")
+            self.conv_act=self.conv_act.to("cuda")
             sample = self.conv_norm_out(sample)
             sample = self.conv_act(sample)
+        self.conv_out=self.conv_out.to("cuda")
         sample = self.conv_out(sample)
 
         # 6. post-process
         output_list = [sample]
         for i, sample_tmp in enumerate(sample_list):
             if self.conv_norm_out_branch[i]:
+                self.conv_norm_out_branch=self.conv_norm_out_branch.to("cuda")
+                self.conv_act_branch=self.conv_act_branch.to("cuda")
                 sample_tmp = self.conv_norm_out_branch[i](sample_tmp)
                 sample_tmp = self.conv_act_branch[i](sample_tmp)
+            self.conv_out_branch=self.conv_out_branch.to("cuda")
             sample_tmp = self.conv_out_branch[i](sample_tmp)
             output_list.append(sample_tmp)
         sample = torch.cat(output_list, dim=1)

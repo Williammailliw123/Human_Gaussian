@@ -946,7 +946,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--smplx_path",
         type=str,
-        default="smplx_models",
+        default="./",
         help="path to models folder (contains smplx/)",
     )
     parser.add_argument(
